@@ -8,7 +8,12 @@ import vueDevTools from 'vite-plugin-vue-devtools'
 export default defineConfig({
   base: './', // <-- для Capacitor (Android/iOS/Electron)
   plugins: [vue(), vueDevTools()],
- resolve: { alias: { '@': ..., '@api': fileURLToPath(new URL('./src/api', import.meta.url)) } },
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+      '@api': fileURLToPath(new URL('./src/api', import.meta.url)),
+    },
+  },
   build: {
     outDir: 'dist', // дефолт, но фиксируем явно
     emptyOutDir: true,
