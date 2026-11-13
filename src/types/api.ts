@@ -38,3 +38,13 @@ export interface UpdateProfilePayload {
     color?: string
   }
 }
+
+export interface SendLocationPayload {
+  lat: number
+  lng: number
+  timestamp: number
+  accuracy?: number
+  speed?: number | null
+  heading?: number | null
+  status: boolean
+}

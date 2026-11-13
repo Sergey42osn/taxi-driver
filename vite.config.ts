@@ -20,4 +20,24 @@ export default defineConfig({
     // Для WebView старых Android — можно понизить target:
     // target: 'es2017',
   },
+  server: {
+    proxy: {
+      '/wp-json': {
+        target: 'https://web42.ru/taxidriver',
+        changeOrigin: true,
+        secure: false,
+        cookieDomainRewrite: 'localhost', // ← переписать Domain на localhost
+        cookiePathRewrite: '/', // ← path=/ (на всякий случай)
+        // важно: не терять Set-Cookie
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            // для отладки: посмотреть, какие Set-Cookie приходят от бэкенда
+            if (proxyRes.headers['set-cookie']) {
+              console.log('[proxy] set-cookie:', proxyRes.headers['set-cookie'])
+            }
+          })
+        },
+      },
+    },
+  },
 })

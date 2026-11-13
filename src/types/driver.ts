@@ -1,3 +1,6 @@
+import { driverApi } from '@/api/driver'
+import type { SendLocationPayload } from '@/types/api'
+
 export interface Driver {
   id: string
   name: string
@@ -23,8 +26,19 @@ export interface RideOrder {
   price: number
   distanceKm: number
   durationMin: number
+  status: DriverStatus
   passenger: { name: string; rating?: number; phone?: string }
   createdAt: number
+}
+
+export interface SendLocationPayload {
+  // ← локальное, без status
+  lat: number
+  lng: number
+  timestamp: number
+  accuracy?: number
+  speed?: number | null
+  heading?: number | null
 }
 
 export type RideState =

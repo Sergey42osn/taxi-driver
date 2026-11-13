@@ -1,24 +1,33 @@
 import './assets/main.css'
-import 'leaflet/dist/leaflet.css' // <-- обязательно
+import 'leaflet/dist/leaflet.css'
 
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
-import { setUnauthorizedHandler } from './services/http'
 import { useDriverStore } from './stores/driver'
-
-import './assets/main.css'
+import { tokenHolder } from '@/services/tokenHolder' // ← добавить сюда
 
 const app = createApp(App)
-app.use(createPinia())
+const pinia = createPinia()
+
+app.use(pinia)
 app.use(router)
 
-// 401 → принудительный разлогин
-setUnauthorizedHandler(() => {
-  const driver = useDriverStore()
-  driver.clearSession()
-  router.push({ name: 'login' })
+const driver = useDriverStore(pinia)
+
+// разлогин по событию из http.ts — навешиваем ДО restoreSession
+window.addEventListener('auth:logout', () => {
+  router.replace({ name: 'login' })
 })
 
-app.mount('#app')
+;(async () => {
+  const ok = await driver.restoreSession()
+
+  console.log('[main] token:', driver.accessToken ? 'present' : 'NULL')
+
+  if (!ok) console.warn('[main] no active session, mounting as guest')
+
+  // Монтируем ПОСЛЕ восстановления — guard увидит актуальный driver
+  app.mount('#app')
+})()

@@ -46,11 +46,17 @@ async function submit() {
 
             <p v-if="error" class="error">{{ error }}</p>
 
-            <button class="submit" type="submit" :disabled="loading">
-                {{ loading ? 'Вход…' : 'Войти' }}
-            </button>
-
-            <p class="hint">Демо: любой email + пароль от 4 символов</p>
+            <div class="form_row form_row_btn">
+                <button class="submit" type="submit" :disabled="loading">
+                    {{ loading ? 'Вход…' : 'Войти' }}
+                </button>
+                <p class="switch">
+                    Нет аккаунта?
+                    <RouterLink :to="{ name: 'register', query: { redirect: route.query.redirect } }">
+                        Зарегистрироваться
+                    </RouterLink>
+                </p>
+            </div>
         </form>
     </div>
 </template>

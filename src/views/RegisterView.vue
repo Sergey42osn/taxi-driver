@@ -1,217 +1,386 @@
-<script setup>
-import { ref, computed, onMounted } from 'vue'
+<script setup lang="ts">
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { useDriverStore } from '@/stores/driver'
 
 const route = useRoute()
 const router = useRouter()
-const driver = useDriverStore()
+const store = useDriverStore()
+const { regStep, pendingEmail, regLoading, regError, regFieldErrors, regCodeHint, resAction, regSuccess } = storeToRefs(store)
 
-const step = ref('phone') // 'phone' | 'code' | 'details'
-const phone = ref(typeof route.query.phone === 'string' ? route.query.phone : '')
+// ─── поля формы ───────────────────────────────────────────
+const name = ref('')
+const phone = ref('')
+const email = ref('')
+const password = ref('')
+const passwordConfirm = ref('')
 const code = ref('')
-const city = ref('')
-const status = ref('') // 'self_employed' | 'ip' | 'park'
 
-const loading = ref(false)
-const error = ref('')
-const codeSent = ref(false)
+// ─── ui-состояние ─────────────────────────────────────────
+const showPassword = ref(false)
+const showPasswordConfirm = ref(false)
 const resendTimer = ref(0)
-let resendInterval = null
+let resendInterval: ReturnType<typeof setInterval> | null = null
 
-const cities = [
-    { value: 'moscow', label: 'Москва' },
-    { value: 'spb', label: 'Санкт-Петербург' },
-    { value: 'kazan', label: 'Казань' },
-    { value: 'novosibirsk', label: 'Новосибирск' },
-]
+// ─── анти-бот ─────────────────────────────────────────────
+const isBot = ref(1)                       // 1 = подозрительно, 0 = человек
+const honeypotTel = ref('')                // honeypot
+// время фиксируется один раз при отрисовке формы (Unix, секунды)
+const time = ref<number>(Math.floor(Date.now() / 1000))
 
-const statuses = [
-    { value: 'self_employed', label: 'Самозанятый' },
-    { value: 'ip', label: 'ИП' },
-    { value: 'park', label: 'Через таксопарк' },
-]
+function markHuman() {
+    if (isBot.value !== 0) isBot.value = 0
+}
 
-const phoneValid = computed(() => /^\+7\d{10}$/.test(phone.value))
+// ─── телефон ──────────────────────────────────────────────
+const phoneModel = computed({
+    get: () => phone.value,
+    set: (val: string) => { phone.value = normalizePhone(val) },
+})
+
+function normalizePhone(value: string): string {
+    let digits = String(value).replace(/\D/g, '')
+    if (!digits) return ''
+    if (digits[0] === '8') digits = '7' + digits.slice(1)
+    else if (digits[0] === '9') digits = '7' + digits
+    if (digits[0] !== '7') return ''
+    digits = digits.slice(0, 11)
+    let out = '+7'
+    if (digits.length > 1) out += ' ' + digits.slice(1, 4)
+    if (digits.length > 4) out += ' ' + digits.slice(4, 7)
+    if (digits.length > 7) out += '-' + digits.slice(7, 9)
+    if (digits.length > 9) out += '-' + digits.slice(9, 11)
+    return out
+}
+
+// ─── валидация формы ──────────────────────────────────────
+const nameValid = computed(() => name.value.trim().length >= 2)
+
+const phoneDigitsValid = computed(() => {
+    let d = phone.value.replace(/\D/g, '')
+    if (d[0] === '8') d = '7' + d.slice(1)
+    else if (d[0] === '9') d = '7' + d
+    return /^7\d{10}$/.test(d)
+})
+
+const emailValid = computed(() =>
+    /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.value.trim()),
+)
+
+const passwordChecks = computed(() => ({
+    length: password.value.length >= 8,
+    upper: /[A-ZА-ЯЁ]/.test(password.value),
+    digit: /\d/.test(password.value),
+    special: /[^A-Za-zА-Яа-яЁё0-9]/.test(password.value),
+}))
+
+const passwordValid = computed(() =>
+    Object.values(passwordChecks.value).every(Boolean),
+)
+
+const passwordConfirmValid = computed(
+    () => passwordConfirm.value.length > 0 && passwordConfirm.value === password.value,
+)
+
+const formValid = computed(
+    () =>
+        nameValid.value &&
+        phoneDigitsValid.value &&
+        emailValid.value &&
+        passwordValid.value &&
+        passwordConfirmValid.value,
+)
+
+const canSubmit = computed(() => formValid.value && !regLoading.value)
+
+// ─── валидация кода ───────────────────────────────────────
 const codeValid = computed(() => /^\d{4,6}$/.test(code.value))
-const detailsValid = computed(() => city.value && status.value)
+const canVerify = computed(() => codeValid.value && !regLoading.value)
+const canResend = computed(() => resendTimer.value === 0 && !regLoading.value)
 
-const canSendCode = computed(() => phoneValid.value && !loading.value && resendTimer.value === 0)
-const canSubmitCode = computed(() => codeValid.value && !loading.value)
-const canSubmitDetails = computed(() => detailsValid.value && !loading.value)
+const emailConfirmedNotice = ref(false)
 
-function normalizePhone(value) {
-    const digits = value.replace(/\D/g, '')
-    if (digits.startsWith('8')) return '+7' + digits.slice(1)
-    if (digits.startsWith('7')) return '+' + digits
-    if (digits.startsWith('9')) return '+7' + digits
-    return value
+// ─── очистка ошибки поля ──────────────────────────────────
+function clearFieldError(field: string) {
+    if (!regFieldErrors.value[field]) return
+    const next = { ...regFieldErrors.value }
+    delete next[field]
+    regFieldErrors.value = next
 }
 
-function onPhoneInput(e) {
-    phone.value = normalizePhone(e.target.value)
-    error.value = ''
+function removeErrorInfo() {
+    regError.value = null
+    regFieldErrors.value = {}
+    regCodeHint.value = ''
 }
 
-async function sendCode() {
-    if (!canSendCode.value) return
-    loading.value = true
-    error.value = ''
+// ─── отправка ─────────────────────────────────────────────
+async function submitForm() {
+    console.log('submitForm')
+
+    removeErrorInfo()
+
+    if (!canSubmit.value) return
     try {
-        await driver.requestCode(phone.value)
-        codeSent.value = true
-        step.value = 'code'
-        startResendTimer()
-    } catch (e) {
-        error.value = e?.response?.data?.message || 'Не удалось отправить код. Проверьте номер и попробуйте снова.'
-    } finally {
-        loading.value = false
-    }
-}
+        const res = await store.register({
+            name: name.value.trim(),
+            phone: phone.value.replace(/\D/g, ''),
+            email: email.value.trim().toLowerCase(),
+            password: password.value,
+            password_confirmation: passwordConfirm.value,
+            is_bot: isBot.value,
+            tel: honeypotTel.value,
+            time: time.value,
+            code: code.value,
+        })
+        console.log(res)
 
-function startResendTimer() {
-    resendTimer.value = 60
-    clearInterval(resendInterval)
-    resendInterval = setInterval(() => {
-        resendTimer.value -= 1
-        if (resendTimer.value <= 0) clearInterval(resendInterval)
-    }, 1000)
-}
+        if (res.code_sent) {
 
-async function submitCode() {
-    if (!canSubmitCode.value) return
-    loading.value = true
-    error.value = ''
-    try {
-        await driver.verifyCode(phone.value, code.value)
-        step.value = 'details'
-    } catch (e) {
-        error.value = e?.response?.data?.message || 'Неверный код. Попробуйте ещё раз.'
-        code.value = ''
-    } finally {
-        loading.value = false
-    }
-}
+            if (res.registered) {
+                console.log('register_success')
+                goHome()
+                return
+            } else {
+                startResendTimer()
+            }
 
-async function submitDetails() {
-    if (!canSubmitDetails.value) return
-    loading.value = true
-    error.value = ''
-    try {
-        await driver.completeRegistration({ city: city.value, status: status.value })
-        const redirect = route.query.redirect
-        const safe = typeof redirect === 'string' && redirect.startsWith('/')
-        if (driver.status === 'approved' && safe) {
-            router.replace(redirect)
         } else {
-            router.replace({ name: 'onboarding' })
+            goNext()
         }
-    } catch (e) {
-        error.value = e?.response?.data?.message || 'Не удалось завершить регистрацию. Попробуйте позже.'
-    } finally {
-        loading.value = false
+    } catch {
+        // regError / regFieldErrors уже в сторе
+    }
+}
+
+function goHome() {
+    // 1. Безопасно извлекаем redirect из query
+    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : null
+    const safe = redirect && redirect.startsWith('/') && !redirect.startsWith('//')
+
+    console.log(store.driver)
+
+    // 2. Если водитель не прошёл онбординг — сначала туда
+    if (store.driver?.status !== 'approved') {
+        router.replace({ name: 'onboarding' })
+        return
+    }
+
+    // 3. Если есть безопасный redirect — туда, иначе на главную
+    if (safe) {
+        router.replace(redirect)
+    } else {
+        router.replace({ name: 'home' })
+    }
+}
+
+async function verify() {
+    if (!canVerify.value) return
+    const ok = await store.verifyRegistration(code.value)
+    if (ok) goNext()
+    else code.value = ''
+}
+
+async function resend() {
+    if (!canResend.value) return
+    try {
+        await store.resendRegistrationCode(email.value)
+        startResendTimer()
+    } catch {
+        // regError уже в сторе
     }
 }
 
 function goBack() {
-    error.value = ''
-    if (step.value === 'code') step.value = 'phone'
-    else if (step.value === 'details') step.value = 'code'
+    store.resetRegistration()
+    code.value = ''
 }
 
-onMounted(() => {
-    if (phone.value && phoneValid.value) {
-        // номер пришёл из query — можно сразу предложить отправить код
-    }
-})
+function startResendTimer() {
+    resendTimer.value = 60
+    if (resendInterval) clearInterval(resendInterval)
+    resendInterval = setInterval(() => {
+        resendTimer.value -= 1
+        if (resendTimer.value <= 0 && resendInterval) {
+            clearInterval(resendInterval)
+            resendInterval = null
+        }
+    }, 1000)
+}
 
-// очистка таймера при размонтировании
-import { onBeforeUnmount } from 'vue'
-onBeforeUnmount(() => clearInterval(resendInterval))
+function goNext() {
+    const redirect =
+        typeof route.query.redirect === 'string' ? route.query.redirect : null
+    const safe =
+        redirect && redirect.startsWith('/') && !redirect.startsWith('//')
+    if (store.driver?.status === 'approved' && safe) {
+        router.replace(redirect)
+    } else {
+        router.replace({ name: 'onboarding' })
+    }
+}
+
+onBeforeUnmount(() => {
+    if (resendInterval) clearInterval(resendInterval)
+})
 </script>
 
 <template>
     <div class="register-page">
         <header class="register-header">
-            <button v-if="step !== 'phone'" class="back-btn" type="button" @click="goBack" :disabled="loading">
+            <button v-if="regStep === 'code'" class="back-btn" type="button" :disabled="regLoading" @click="goBack">
                 ← Назад
             </button>
-            <h1 class="title">Регистрация водителя</h1>
+            <h1 class="title">
+                <template v-if="regStep === 'form'">Регистрация водителя</template>
+                <template v-else>Подтверждение почты</template>
+            </h1>
             <p class="subtitle">
-                <template v-if="step === 'phone'">Введите номер телефона — он будет вашим логином</template>
-                <template v-else-if="step === 'code'">Введите код из SMS, отправленный на {{ phone }}</template>
-                <template v-else>Укажите город работы и ваш статус</template>
+                <template v-if="regStep === 'form'">
+                    Заполните данные — это займёт пару минут
+                </template>
+                <template v-else>
+                    Подтвердите почту <b>{{ pendingEmail }}</b>
+                </template>
             </p>
         </header>
 
-        <div class="steps">
-            <span :class="['dot', { active: step === 'phone' }]">1</span>
-            <span class="line" />
-            <span :class="['dot', { active: step === 'code' }]">2</span>
-            <span class="line" />
-            <span :class="['dot', { active: step === 'details' }]">3</span>
-        </div>
+        <!-- ОДНА форма -->
+        <form class="form" autocomplete="off" @submit.prevent="submitForm" @focusin="regStep === 'form' && markHuman()"
+            @input="markHuman" @keydown="markHuman" @pointerdown="markHuman">
+            <!-- ─── поля данных (шаг form) ─── -->
 
-        <form class="form" @submit.prevent>
-            <!-- Шаг 1: телефон -->
-            <template v-if="step === 'phone'">
-                <label class="field">
-                    <span class="label">Номер телефона</span>
-                    <input :value="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+7 999 123-45-67"
-                        :disabled="loading" @input="onPhoneInput" />
+            <label class="field">
+                <span class="label">Имя <i>*</i></span>
+                <input v-model="name" type="text" autocomplete="name" placeholder="Иван Иванов" maxlength="80"
+                    :disabled="regLoading" :class="{ 'input-error': regFieldErrors.name }"
+                    @input="clearFieldError('name')" />
+                <p v-if="regFieldErrors.name" class="field-error">{{ regFieldErrors.name }}</p>
+            </label>
+
+            <label class="field">
+                <span class="label">Телефон <i>*</i></span>
+                <input v-model="phoneModel" type="tel" inputmode="tel" autocomplete="tel" placeholder="+7 999 123-45-67"
+                    maxlength="18" :disabled="regLoading" :class="{ 'input-error': regFieldErrors.phone }"
+                    @input="clearFieldError('phone')" />
+                <p v-if="regFieldErrors.phone" class="field-error">{{ regFieldErrors.phone }}</p>
+            </label>
+
+            <label class="field">
+                <span class="label">Email <i>*</i></span>
+                <input v-model="email" type="email" autocomplete="email" placeholder="you@example.com" maxlength="120"
+                    :disabled="regLoading" :class="{ 'input-error': regFieldErrors.email }"
+                    @input="clearFieldError('email')" />
+                <p v-if="regFieldErrors.email" class="field-error">{{ regFieldErrors.email }}</p>
+            </label>
+
+            <label class="field">
+                <span class="label">Пароль <i>*</i></span>
+                <div class="password-wrap">
+                    <input v-model="password" :type="showPassword ? 'text' : 'password'" autocomplete="new-password"
+                        placeholder="Минимум 8 символов" maxlength="128" :disabled="regLoading" />
+                    <button type="button" class="eye" :aria-label="showPassword ? 'Скрыть пароль' : 'Показать пароль'"
+                        @click="showPassword = !showPassword">
+                        {{ showPassword ? '🙈' : '👁' }}
+                    </button>
+                </div>
+                <ul class="checks">
+                    <li :class="{ ok: passwordChecks.length }">Не менее 8 символов</li>
+                    <li :class="{ ok: passwordChecks.upper }">Одна заглавная буква</li>
+                    <li :class="{ ok: passwordChecks.digit }">Одна цифра</li>
+                    <li :class="{ ok: passwordChecks.special }">Один спецсимвол</li>
+                </ul>
+            </label>
+
+            <label class="field">
+                <span class="label">Подтверждение пароля <i>*</i></span>
+                <div class="password-wrap">
+                    <input v-model="passwordConfirm" :type="showPasswordConfirm ? 'text' : 'password'"
+                        autocomplete="new-password" placeholder="Повторите пароль" maxlength="128"
+                        :disabled="regLoading" />
+                    <button type="button" class="eye"
+                        :aria-label="showPasswordConfirm ? 'Скрыть пароль' : 'Показать пароль'"
+                        @click="showPasswordConfirm = !showPasswordConfirm">
+                        {{ showPasswordConfirm ? '🙈' : '👁' }}
+                    </button>
+                </div>
+                <p v-if="passwordConfirm && !passwordConfirmValid" class="field-error">
+                    Пароли не совпадают
+                </p>
+            </label>
+
+            <!-- honeypot + hidden -->
+            <div class="hp-wrap" aria-hidden="true">
+                <label>
+                    <span>Не заполняйте это поле</span>
+                    <input v-model="honeypotTel" type="tel" name="tel" tabindex="-1" autocomplete="off"
+                        placeholder="Ваш телефон" />
                 </label>
-                <button class="primary" type="button" :disabled="!canSendCode" @click="sendCode">
-                    <span v-if="loading">Отправляем…</span>
-                    <span v-else>Получить код</span>
-                </button>
+            </div>
+            <input type="hidden" name="is_bot" :value="isBot" />
+            <input type="hidden" name="time" :value="time" />
+
+
+            <!-- ─── поле кода (шаг code) — внутри той же формы ─── -->
+            <template v-if="regStep === 'code'">
+                <label class="field">
+                    <span class="label">Код из письма <i>*</i></span>
+                    <input v-model="code" type="text" inputmode="numeric" name="code" autocomplete="one-time-code"
+                        maxlength="6" placeholder="••••" :disabled="regLoading"
+                        :class="{ 'input-error': regFieldErrors.code }" @input="clearFieldError('code')" />
+                    <p class="hint" v-if="regCodeHint">
+                        <span :class="regSuccess ? 'ajax_success' : 'ajax_hint'">
+                            {{ regCodeHint }}
+                        </span>
+                    </p>
+                    <p v-if="regFieldErrors.code" class="field-error">{{ regFieldErrors.code }}</p>
+                </label>
             </template>
 
-            <!-- Шаг 2: код -->
-            <template v-else-if="step === 'code'">
-                <label class="field">
-                    <span class="label">Код из SMS</span>
-                    <input v-model="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
-                        placeholder="••••" :disabled="loading" />
-                </label>
-                <button class="primary" type="button" :disabled="!canSubmitCode" @click="submitCode">
-                    <span v-if="loading">Проверяем…</span>
+            <div v-if="emailConfirmedNotice" class="notice" role="status">
+                <p>Email уже подтверждён. Можно перейти к следующему шагу.</p>
+                <button class="primary" type="button" @click="goNext">
+                    Продолжить
+                </button>
+            </div>
+
+            <!-- общая ошибка: на шаге form — только если нет ошибок полей -->
+            <p v-if="regError && (regStep === 'code' || !Object.keys(regFieldErrors).length)" class="error"
+                role="alert">
+                {{ regError }}
+            </p>
+
+            <!-- ─── кнопки: показываем нужную по шагу ─── -->
+            <button v-if="regStep === 'form'" class="primary" type="submit" :disabled="!canSubmit">
+                <span v-if="regLoading">Отправляем…</span>
+                <span v-else>Зарегистрироваться</span>
+            </button>
+
+            <template v-else>
+                <button class="primary" type="submit" :disabled="!canVerify">
+                    <span v-if="regLoading">Проверяем…</span>
                     <span v-else>Подтвердить</span>
                 </button>
-                <button class="link" type="button" :disabled="resendTimer > 0 || loading" @click="sendCode">
-                    <template v-if="resendTimer > 0">Отправить повторно через {{ resendTimer }} с</template>
+
+                <button class="link" type="button" :disabled="!canResend" @click="resend">
+                    <template v-if="resendTimer > 0">
+                        Отправить повторно через {{ resendTimer }} с
+                    </template>
                     <template v-else>Отправить код повторно</template>
                 </button>
-            </template>
 
-            <!-- Шаг 3: город и статус -->
-            <template v-else>
-                <label class="field">
-                    <span class="label">Город работы</span>
-                    <select v-model="city" :disabled="loading">
-                        <option value="" disabled>Выберите город</option>
-                        <option v-for="c in cities" :key="c.value" :value="c.value">{{ c.label }}</option>
-                    </select>
-                </label>
-                <label class="field">
-                    <span class="label">Ваш статус</span>
-                    <select v-model="status" :disabled="loading">
-                        <option value="" disabled>Выберите статус</option>
-                        <option v-for="s in statuses" :key="s.value" :value="s.value">{{ s.label }}</option>
-                    </select>
-                </label>
-                <button class="primary" type="button" :disabled="!canSubmitDetails" @click="submitDetails">
-                    <span v-if="loading">Сохраняем…</span>
-                    <span v-else>Продолжить</span>
+                <button class="link muted" type="button" :disabled="regLoading" @click="goBack">
+                    Изменить данные
                 </button>
-                <p class="hint">Документы загрузите на следующем шаге — это займёт пару минут</p>
             </template>
-
-            <p v-if="error" class="error" role="alert">{{ error }}</p>
         </form>
 
         <footer class="footer">
             <span>Уже есть аккаунт?</span>
-            <RouterLink :to="{ name: 'login', query: { redirect: route.query.redirect } }">Войти</RouterLink>
+            <RouterLink :to="{ name: 'login', query: { redirect: route.query.redirect } }">
+                Войти
+            </RouterLink>
         </footer>
     </div>
 </template>
@@ -255,35 +424,6 @@ onBeforeUnmount(() => clearInterval(resendInterval))
     margin: 0;
 }
 
-.steps {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.dot {
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    display: grid;
-    place-items: center;
-    font-size: 12px;
-    font-weight: 600;
-    background: #e5e7eb;
-    color: #6b7280;
-}
-
-.dot.active {
-    background: #2563eb;
-    color: #fff;
-}
-
-.line {
-    flex: 1;
-    height: 2px;
-    background: #e5e7eb;
-}
-
 .form {
     display: flex;
     flex-direction: column;
@@ -302,25 +442,90 @@ onBeforeUnmount(() => clearInterval(resendInterval))
     font-weight: 500;
 }
 
-input,
-select {
+.label i {
+    color: #dc2626;
+    font-style: normal;
+}
+
+input {
     height: 46px;
     padding: 0 12px;
     border: 1px solid #d1d5db;
     border-radius: 10px;
     font-size: 16px;
     background: #fff;
+    width: 100%;
+    box-sizing: border-box;
 }
 
-input:focus,
-select:focus {
+input:focus {
     outline: none;
     border-color: #2563eb;
 }
 
-input:disabled,
-select:disabled {
+input:disabled {
     background: #f3f4f6;
+}
+
+.input-error {
+    border-color: #dc2626;
+}
+
+.input-error:focus {
+    border-color: #dc2626;
+}
+
+.password-wrap {
+    position: relative;
+}
+
+.password-wrap input {
+    padding-right: 44px;
+}
+
+.eye {
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    transform: translateY(-50%);
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 18px;
+    padding: 6px;
+    line-height: 1;
+}
+
+.checks {
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.checks li {
+    font-size: 12px;
+    color: #9ca3af;
+}
+
+.checks li::before {
+    content: '○ ';
+}
+
+.checks li.ok {
+    color: #16a34a;
+}
+
+.checks li.ok::before {
+    content: '● ';
+}
+
+.field-error {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #dc2626;
 }
 
 .primary {
@@ -353,18 +558,16 @@ select:disabled {
     cursor: not-allowed;
 }
 
+.link.muted {
+    color: #6b7280;
+}
+
 .error {
     color: #dc2626;
     font-size: 14px;
     background: #fef2f2;
     padding: 10px 12px;
     border-radius: 8px;
-}
-
-.hint {
-    font-size: 13px;
-    color: #6b7280;
-    margin: 0;
 }
 
 .footer {
@@ -380,5 +583,24 @@ select:disabled {
 .footer a {
     color: #2563eb;
     text-decoration: none;
+}
+
+.hp-wrap {
+    position: absolute;
+    left: -9999px;
+    top: auto;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+}
+
+.hint {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #df1313;
+}
+
+.hint .ajax_success {
+    color: green;
 }
 </style>

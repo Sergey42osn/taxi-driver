@@ -1,5 +1,5 @@
 import { http } from '@/services/http'
-import type { UpdateProfilePayload } from '@/types/api'
+import type { SendLocationPayload, UpdateProfilePayload } from '@/types/api'
 import type { Driver } from '@/types/driver'
 
 export const driverApi = {
@@ -9,6 +9,15 @@ export const driverApi = {
   },
 
   async setOnline(online: boolean): Promise<void> {
-    await http.post('/driver/status', { online })
+    //await http.post('/driver/status', { online })
+
+    const { data } = await http.post('/driver/status', { online })
+    return data
+  },
+
+  async sendLocation(payload: SendLocationPayload): Promise<void> {
+    console.log(payload)
+
+    await http.post('/driver/location', payload)
   },
 }
